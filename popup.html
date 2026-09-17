@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main class="popup">
+    <header>
+      <h1>Threads Follower Remover</h1>
+      <p class="subtitle">Remove followers or unfollow accounts (remove following) on Threads.</p>
+    </header>
+
+    <div class="status-row">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">Idle</span>
+    </div>
+
+    <div class="row">
+      <label>Mode</label>
+      <div class="mode-select" role="radiogroup" aria-label="Action mode">
+        <label class="mode-opt" title="Hapus orang yang mengikuti kamu">
+          <input type="radio" name="mode" value="followers" checked />
+          <span>Remove followers</span>
+        </label>
+        <label class="mode-opt" title="Unfollow (remove following) orang yang kamu ikuti">
+          <input type="radio" name="mode" value="following" />
+          <span>Remove following</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="row">
+      <label for="delay">Delay between removals (ms)</label>
+      <input type="number" id="delay" min="500" step="100" value="1000" />
+    </div>
+
+    <div class="row">
+      <label for="idleScroll">Auto-scroll after idle (seconds, 0 = off)</label>
+      <input type="number" id="idleScroll" min="0" step="1" value="10" />
+    </div>
+
+    <div class="actions">
+      <button id="startBtn" class="primary">Start</button>
+      <button id="stopBtn" class="danger">Stop</button>
+    </div>
+
+    <p class="count">Removed: <strong id="count">0</strong></p>
+
+    <div class="log-header">
+      <span>Debug log</span>
+      <span>
+        <button id="diagnoseBtn" type="button">Diagnose</button>
+        <button id="dumpBtn" type="button">Dump HTML</button>
+        <button id="pinBtn" type="button" title="Open as pinned window">📌 Pin</button>
+        <button id="clearLogBtn" type="button">Clear</button>
+      </span>
+    </div>
+    <pre id="logBox" class="log-box"></pre>
+
+    <footer class="hint">
+      Open <strong>threads.com</strong>, go to your profile, click
+      <em>Followers</em> or <em>Following</em>, then press <strong>Start</strong>.
+      You may need to let the list fully load first.
+    </footer>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

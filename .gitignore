@@ -1,0 +1,21 @@
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+
+# Build/artefak yang tidak perlu di-repo
+*.zip
+*.crx
+*.pem
+
+# Catatan pribadi
+*.log
