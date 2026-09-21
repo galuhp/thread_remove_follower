@@ -17,19 +17,109 @@ const CONFIG = {
   removeWait: 700,      // tunggu setelah klik "Remove follower"
   confirmWait: 500,     // tunggu setelah klik konfirmasi
   retryDelay: 2500,     // ulangi scan bila modal tidak terbuka/kosong
+  verifyWait: 900,      // tunggu re-render daftar sebelum verifikasi hasil
+  maxRowAttempts: 2,    // maksimal percobaan "nyata" (ada klik/gagal verifikasi) per baris
+  maxSoftAttempts: 6,   // maksimal percobaan "tidak jelas" (tombol/menu belum termuat)
 };
 
-// Regex pencocokan — sesuaikan bila UI Threads berubah teks/bahasa.
+// Versi content script — dibaca dari manifest.json saat script di-inject, lalu
+// dikirim ke popup (STATUS/DIAGNOSE) supaya popup bisa membandingkan dengan
+// versi extension dan mendeteksi content script versi lama yang masih jalan
+// di tab (perlu reload extension di chrome://extensions + refresh tab).
+const SCRIPT_VERSION = (() => {
+  try { return chrome.runtime.getManifest().version; } catch (e) { return null; }
+})();
+
+// ---------------------------------------------------------------------------
+// Pola teks (regex) pencocokan UI Threads.
+// Default-nya ada di patterns.js (dimuat sebelum file ini — lihat manifest.json)
+// dan bisa diubah dari popup (panel "Patterns") tanpa mengedit file:
+// popup menyimpan ke chrome.storage.local lalu mengirim pesan SET_PATTERNS.
 // PENTING: di Threads, tombol remove follower = "Unfollow" (bukan "Remove follower").
-const REMOVE_ITEM_RE = /unfollow|remove\s+follower|hapus\s+pengikut/i;
-const REMOVE_FALLBACK_RE = /^unfollow$|^remove$|remove\s+follower|hapus/i;
-const ACTION_TEXT_RE =
-  /^(following|follow back|follows you|follow|mengikuti|ikuti balik|ikuti)$/i;
-const MORE_LABEL_RE = /more|titik tiga|three dots|opsi/i;
+// ---------------------------------------------------------------------------
+const PATTERNS_READY =
+  typeof TFR_DEFAULT_PATTERNS === 'object' && !!TFR_DEFAULT_PATTERNS && typeof tfrBuildRegex === 'function';
+
+// Gagal-tertutup: bila patterns.js tidak termuat, /(?!)/ tidak mencocokkan apa pun
+// supaya extension tidak melakukan klik yang salah.
+let REMOVE_ITEM_RE = PATTERNS_READY ? tfrBuildRegex(TFR_DEFAULT_PATTERNS.removeItem) : /(?!)/;
+let REMOVE_FALLBACK_RE = PATTERNS_READY ? tfrBuildRegex(TFR_DEFAULT_PATTERNS.removeFallback) : /(?!)/;
+let ACTION_TEXT_RE = PATTERNS_READY ? tfrBuildRegex(TFR_DEFAULT_PATTERNS.actionFollowers) : /(?!)/;
+let MORE_LABEL_RE = PATTERNS_READY ? tfrBuildRegex(TFR_DEFAULT_PATTERNS.moreLabel) : /(?!)/;
+// Tombol baris yang berarti "kamu masih following dia" (target mode following).
+// Tombol "Follow"/"Follow back" TIDAK boleh diklik di mode ini — itu akan
+// menjadikan dia ter-follow kembali.
+let STILL_FOLLOWING_RE = PATTERNS_READY ? tfrBuildRegex(TFR_DEFAULT_PATTERNS.actionFollowing) : /(?!)/;
 
 // Judul modal sesuai mode aktif — followers (hapus pengikut) atau following (unfollow).
-const FOLLOWERS_TITLE_RE = /^followers$|^pengikut$/i;
-const FOLLOWING_TITLE_RE = /^following$|^mengikuti$/i;
+let FOLLOWERS_TITLE_RE = PATTERNS_READY ? tfrBuildRegex(TFR_DEFAULT_PATTERNS.followersTitle) : /(?!)/;
+let FOLLOWING_TITLE_RE = PATTERNS_READY ? tfrBuildRegex(TFR_DEFAULT_PATTERNS.followingTitle) : /(?!)/;
+
+// Kata kunci tambahan saat mencari menu remove (bukan regex).
+let REMOVE_TERMS = PATTERNS_READY
+  ? TFR_DEFAULT_PATTERNS.removeTerms.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+  : [];
+
+// Pola yang sedang aktif (dikirim ke popup & dicatat di log).
+function currentPatterns() {
+  if (!PATTERNS_READY) return null;
+  return {
+    actionFollowing: STILL_FOLLOWING_RE.source,
+    actionFollowers: ACTION_TEXT_RE.source,
+    removeItem: REMOVE_ITEM_RE.source,
+    removeFallback: REMOVE_FALLBACK_RE.source,
+    removeTerms: REMOVE_TERMS.join(', '),
+    moreLabel: MORE_LABEL_RE.source,
+    followersTitle: FOLLOWERS_TITLE_RE.source,
+    followingTitle: FOLLOWING_TITLE_RE.source,
+  };
+}
+
+// Terapkan pola dari popup/storage. Pola tidak valid DITOLAK — nilai lama tetap
+// dipakai supaya salah ketik tidak membuat extension salah klik.
+function applyPatterns(cfg) {
+  if (!PATTERNS_READY) {
+    return { ok: false, errors: { _: 'patterns.js tidak termuat sebelum content.js' } };
+  }
+  const next = tfrNormalizePatterns(cfg);
+  const check = tfrValidatePatterns(next);
+  if (!check.ok) {
+    log('Pola DITOLAK — nilai lama tetap dipakai', { errors: check.errors });
+    return { ok: false, errors: check.errors };
+  }
+  REMOVE_ITEM_RE = tfrBuildRegex(next.removeItem);
+  REMOVE_FALLBACK_RE = tfrBuildRegex(next.removeFallback);
+  ACTION_TEXT_RE = tfrBuildRegex(next.actionFollowers);
+  STILL_FOLLOWING_RE = tfrBuildRegex(next.actionFollowing);
+  MORE_LABEL_RE = tfrBuildRegex(next.moreLabel);
+  FOLLOWERS_TITLE_RE = tfrBuildRegex(next.followersTitle);
+  FOLLOWING_TITLE_RE = tfrBuildRegex(next.followingTitle);
+  REMOVE_TERMS = next.removeTerms.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  log('Pola teks dipakai', currentPatterns());
+  return { ok: true, errors: {} };
+}
+
+// Baca pola tersimpan saat content script dimuat — supaya tab ini langsung ikut
+// setting terakhir dari popup (tanpa perlu tekan Start dulu).
+function loadStoredPatterns() {
+  if (!PATTERNS_READY) {
+    log('patterns.js tidak termuat — pakai pola gagal-tertutup (tidak ada klik)');
+    return;
+  }
+  try {
+    chrome.storage.local.get(TFR_STORAGE_KEY, (res) => {
+      if (chrome.runtime.lastError) {
+        log('Gagal baca pola dari storage', { pesan: chrome.runtime.lastError.message });
+        return;
+      }
+      const cfg = res && res[TFR_STORAGE_KEY];
+      if (!cfg) { log('Pola teks pakai default (belum ada setting tersimpan)'); return; }
+      applyPatterns(cfg);
+    });
+  } catch (e) {
+    log('chrome.storage tidak tersedia — pola pakai default', { pesan: String((e && e.message) || e) });
+  }
+}
 
 function modalTitleRe() {
   return state.mode === 'following' ? FOLLOWING_TITLE_RE : FOLLOWERS_TITLE_RE;
@@ -42,10 +132,18 @@ const state = {
   running: false,
   mode: 'followers', // 'followers' (hapus follower) | 'following' (remove/unfollow yang diikuti)
   delay: 1000,
-  count: 0,
+  count: 0,             // HANYA berisi aksi yang terverifikasi di DOM (lihat verifyRemoved)
+  failed: 0,            // aksi yang "diklaim sukses" tetapi tidak terverifikasi di DOM
   detected: 0,
   logs: [],
   modalMode: '-',
+  removed: new Set(),   // username yang sudah terverifikasi hilang dari daftar (anti dobel hitung)
+  modalEl: null,        // cache elemen modal daftar (lihat findModalCached)
+  attempts: new Map(),  // username → percobaan "nyata" (ada aksi / gagal verifikasi)
+  softAttempts: new Map(), // username → percobaan "tidak jelas" (tombol/menu belum ada)
+  notTarget: new Set(), // baris yang tombolnya sudah bukan "Following" (bukan target)
+  runToken: 0,          // token run — loop lama berhenti saat START/STOP baru
+  loopActive: false,    // cegah dua loop paralel (dulu bisa dobel-klik / dobel-hitung)
   attempted: new Set(), // username baris yang sudah dicoba (hindari loop)
   idleScrollSecs: 10,   // auto-scroll bila count tidak bertambah dalam N detik (0 = mati)
   lastProgressAt: 0,    // timestamp terakhir count bertambah (untuk watchdog idle)
@@ -100,7 +198,7 @@ function startWatchdog() {
     const idleMs = Date.now() - state.lastProgressAt;
     if (idleMs < state.idleScrollSecs * 1000) return;
     state.lastProgressAt = Date.now(); // tunggu N detik berikutnya sebelum scroll lagi
-    const modal = findModal();
+    const modal = findModalCached();
     if (!modal) {
       log('Watchdog: modal tidak terbuka — tidak bisa scroll');
       return;
@@ -177,6 +275,18 @@ function findModal() {
   return null;
 }
 
+// Modal daftar dengan CACHE — dipakai loop, verifikasi, dan recheck.
+// Cache ini penting: daftar yang hampir kosong (mis. tinggal 1 baris) tidak lagi
+// memenuhi syarat findModal() (butuh >= 2 gambar), padahal loop masih perlu
+// memverifikasi hasil aksinya. Cache dipakai selama elemennya masih ada di DOM.
+function findModalCached() {
+  const cached = state.modalEl;
+  if (cached && cached.isConnected && isVisible(cached)) return cached;
+  const modal = findModal();
+  state.modalEl = modal;
+  return modal;
+}
+
 // Cek apakah dalam container ada sebuah elemen yang seluruh teksnya sama dengan judul mode.
 function hasHeading(container, re) {
   return [...container.querySelectorAll('h1, h2, h3, [role="heading"], div, span')]
@@ -186,10 +296,18 @@ function hasHeading(container, re) {
     });
 }
 
+// Teks tombol aksi yang menandai sebuah BARIS daftar — gabungan kedua mode, jadi
+// pola custom untuk mode following (STILL_FOLLOWING_RE) juga dipakai saat
+// mendeteksi baris, bukan hanya saat memutuskan klik.
+function isRowActionText(el) {
+  const t = norm(el);
+  return ACTION_TEXT_RE.test(t) || STILL_FOLLOWING_RE.test(t);
+}
+
 function findActionButtonsInRow(row) {
   return [...row.querySelectorAll('[role="button"], button')]
     .filter(isVisible)
-    .filter((b) => ACTION_TEXT_RE.test(norm(b)))[0] || null;
+    .filter(isRowActionText)[0] || null;
 }
 
 function findRowMoreButton(row, includeHidden = false) {
@@ -208,7 +326,7 @@ function findRowMoreButton(row, includeHidden = false) {
 function findRows(modal) {
   const btns = [...modal.querySelectorAll('[role="button"], button')]
     .filter(isVisible)
-    .filter((b) => ACTION_TEXT_RE.test(norm(b)));
+    .filter(isRowActionText);
   const rows = [];
   for (const b of btns) {
     let row = b.closest('[role="listitem"], [role="row"], li') || b.parentElement;
@@ -235,6 +353,8 @@ function usernameOf(row) {
 function diagnose() {
   const modal = findModal();
   const info = {
+    versi: SCRIPT_VERSION || '?',
+    pola: currentPatterns(),
     modalFollowers: !!modal,
     modeModal: state.modalMode,
     dialogTerlihat: [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')]
@@ -341,8 +461,9 @@ async function clickRemoveItem(item, user) {
   log('Klik menu remove', { user, teks: norm(item).slice(0, 40) });
   item.click();
   await sleep(CONFIG.removeWait);
-  await confirmRemoval();
-  return true;
+  // Jangan klaim sukses sendiri: hasil sebenarnya ditentukan oleh confirmRemoval
+  // (dialog konfirmasi) dan verifikasi DOM di runLoop.
+  return await confirmRemoval();
 }
 
 // Hover baris — tombol "…" di Threads sering hanya tampil saat hover.
@@ -369,6 +490,19 @@ function hoverRow(row) {
 // "Unfollow X?" → klik tombol "Unfollow". Tidak perlu menu "Remove follower".
 async function tryUnfollowFollowing(row, user) {
   const actionBtn = findActionButtonsInRow(row);
+
+  // Hanya tombol "Following" yang boleh diklik di mode ini. Bila tombol baris
+  // sudah "Follow"/"Follow back", berarti dia sudah tidak kita-follow — klik
+  // justru akan membuat dia ter-follow kembali.
+  if (actionBtn && !STILL_FOLLOWING_RE.test(norm(actionBtn))) {
+    log('⏭ Skip — tombol baris sudah "Follow" (bukan target: dia tidak kamu-follow), tidak diklik', {
+      user,
+      teks: norm(actionBtn).slice(0, 30),
+    });
+    state.notTarget.add(user); // dicatat → baris ini dilewati dengan penjelasan (tidak bakar jatah percobaan)
+    return false;
+  }
+
   if (actionBtn) {
     log('Klik tombol aksi (remove following)', { user, teks: norm(actionBtn) });
     actionBtn.click();
@@ -398,7 +532,7 @@ async function tryUnfollowFollowing(row, user) {
     log('Klik tombol "…" baris (remove following)', { user });
     more.click();
     await sleep(CONFIG.menuOpenDelay);
-    const item = findRemoveOptionInDoc() || findRemoveItem(findModal());
+    const item = findRemoveOptionInDoc() || findRemoveItem(findModalCached());
     if (item) return await clickRemoveItem(item, user);
     pressEscape();
     await sleep(250);
@@ -435,7 +569,7 @@ async function tryRemoveRow(row) {
     await sleep(CONFIG.menuOpenDelay);
 
     // Menu bisa muncul di luar modal (React portal) — cari di SELURUH dokumen.
-    let item = findRemoveOptionInDoc() || findRemoveItem(findModal());
+    let item = findRemoveOptionInDoc() || findRemoveItem(findModalCached());
     if (item) return await clickRemoveItem(item, user);
 
     // Tunggu lebih lama — menu bisa lambat merender.
@@ -525,33 +659,151 @@ async function tryRemoveRow(row) {
 }
 
 // ==++== Cari opsi "Unfollow" / "Remove follower" di seluruh dokumen (popup/menu popover/dialog) ==++==
+// PENTING: hanya elemen yang BENAR-BENAR bisa diklik (menu item / button / link)
+// yang dikembalikan. Sebelumnya div/span pembungkus ikut terpilih, kliknya tidak
+// melakukan apa pun — tapi tetap dihitung "sukses" (sumber angka dobel).
+const CLICKABLE_SEL =
+  '[role="menuitem"], [role="menuitemradio"], [role="button"], [role="option"], button, a[href], [tabindex]';
+
 function findRemoveOptionInDoc() {
-  // Di Threads, tombol remove follower = "Unfollow" (bukan "Remove follower").
-  const terms = ['unfollow', 'remove follower', 'hapus pengikut', 'remove from followers', 'hapus follower'];
-  // Lintasi semua elemen visible — termasuk di luar modal (portal menu).
-  const candidates = [...document.querySelectorAll(
-    '[role="menuitem"], [role="button"], button, [role="menuitemradio"], div, span'
-  )].filter(isVisible);
-  for (const el of candidates) {
+  // Kata kunci dari pengaturan popup (default: unfollow / remove follower / ...).
+  const terms = REMOVE_TERMS;
+  const matches = (el) => {
     const t = norm(el).toLowerCase();
     const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-    for (const term of terms) {
-      if (t.includes(term)) return el;
-      if (aria.includes(term)) return el;
-    }
-    if (REMOVE_ITEM_RE.test(t) || REMOVE_ITEM_RE.test(aria)) return el;
-  }
-  return null;
+    if (terms.some((term) => t.includes(term) || aria.includes(term))) return true;
+    return REMOVE_ITEM_RE.test(t) || REMOVE_ITEM_RE.test(aria);
+  };
+  const cands = [...document.querySelectorAll(CLICKABLE_SEL)].filter(isVisible).filter(matches);
+  if (!cands.length) return null;
+  // Pilih teks terpendek (kemungkinan besar tombol/menu item, bukan container besar).
+  return cands.sort((a, b) => norm(a).length - norm(b).length)[0];
 }
 
 
 
 // ---------------------------------------------------------------------------
+// Verifikasi & pembatas percobaan
+// ---------------------------------------------------------------------------
+// Tandai percobaan sebuah baris.
+//  'hard' = benar-benar ada aksi/klik (atau error) → dibatasi maxRowAttempts.
+//  'soft' = percobaan tidak jelas: tombol aksi / menu belum termuat (mis. baris baru
+//           selesai di-render). Ini TIDAK boleh membuat baris ter-skip permanen —
+//           dulu baris seperti ini ikut terhitung lalu dilewati (terlihat "lompat").
+function markAttempt(user, kind = 'soft') {
+  if (!user) return;
+  state.attempted.add(user);
+  if (state.attempted.size > 300) state.attempted.clear(); // hanya untuk angka di log
+  if (kind === 'hard') {
+    state.attempts.set(user, (state.attempts.get(user) || 0) + 1);
+  } else {
+    state.softAttempts.set(user, (state.softAttempts.get(user) || 0) + 1);
+  }
+}
+
+// Baris masih perlu dicoba? (belum terverifikasi hilang, bukan target yang dilewati,
+// dan jatah percobaannya masih ada)
+function canTryRow(user) {
+  if (!user) return false;
+  if (state.removed.has(user)) return false;      // sudah terverifikasi hilang
+  if (state.notTarget.has(user)) return false;    // tombolnya "Follow" → bukan target
+  if ((state.attempts.get(user) || 0) >= CONFIG.maxRowAttempts) return false;  // gagal nyata
+  return (state.softAttempts.get(user) || 0) < CONFIG.maxSoftAttempts;        // belum jelas
+}
+
+// Ringkasan alasan baris terlihat TIDAK diproses — dipakai di log supaya jelas
+// kenapa daftar seperti "dilompati".
+function skipBreakdown(rows) {
+  let terverifikasi = 0;
+  let bukanTarget = 0;
+  let gagal = 0;
+  let tidakJelas = 0;
+  rows.forEach((r) => {
+    const u = usernameOf(r);
+    if (state.removed.has(u)) terverifikasi += 1;
+    else if (state.notTarget.has(u)) bukanTarget += 1;
+    else if ((state.attempts.get(u) || 0) >= CONFIG.maxRowAttempts) gagal += 1;
+    else if ((state.softAttempts.get(u) || 0) >= CONFIG.maxSoftAttempts) tidakJelas += 1;
+  });
+  return { barisTerlihat: rows.length, terverifikasi, bukanTarget, gagal, tidakJelas };
+}
+
+// Verifikasi hasil di DOM: aksi baru dihitung bila daftar benar-benar berubah.
+// Inilah yang membuat angka "Removed" sama dengan penurunan nyata di Threads —
+// bukan sekadar "tombolnya sudah diklik".
+// `acted` = apakah kita baru saja mengklik baris ini. Penting: baris yang tombolnya
+// memang bukan "Following" (bukan target, mis. "Follow") tidak boleh dihitung
+// hanya karena tombolnya "bukan lagi Following".
+async function verifyRemoved(user, acted) {
+  await sleep(CONFIG.verifyWait);
+  const modal = findModalCached();
+  if (!modal) return { verified: false, reason: 'modal daftar tidak terbuka saat verifikasi' };
+  const rows = findRows(modal).filter((r) => usernameOf(r) === user);
+  if (!rows.length) return { verified: true, reason: 'baris sudah hilang dari daftar' };
+  if (state.mode === 'following') {
+    const masihFollowing = rows.some((r) => {
+      const b = findActionButtonsInRow(r);
+      return !!b && STILL_FOLLOWING_RE.test(norm(b));
+    });
+    if (masihFollowing) {
+      return { verified: false, reason: 'baris masih ada dengan tombol "Following"' };
+    }
+    // Baris masih ada tapi tombolnya bukan "Following":
+    if (!acted) {
+      return {
+        verified: false,
+        reason: 'tombol baris memang bukan "Following" (bukan target, tidak pernah diklik)',
+      };
+    }
+    return { verified: true, reason: 'tombol baris berubah (bukan lagi "Following")' };
+  }
+  // Mode followers: selama barisnya masih ada di daftar, dia masih follower.
+  return { verified: false, reason: 'baris masih ada di daftar Followers' };
+}
+
+// Bandingkan daftar terverifikasi dengan isi daftar SEKARANG (tombol Recheck).
+// Berguna untuk memastikan angka Removed cocok dengan kondisi nyata, mis. setelah refresh.
+function recheckRemoved() {
+  const modal = findModalCached();
+  if (!modal) {
+    log('Recheck: modal daftar tidak terbuka — buka dulu daftar Followers/Following di profil');
+    return { modal: false, terverifikasi: state.removed.size, masihDiDaftar: null };
+  }
+  const usersInList = new Set(findRows(modal).map(usernameOf));
+  const masih = [...state.removed].filter((u) => usersInList.has(u));
+  if (masih.length) {
+    log('Recheck: ' + masih.length + '/' + state.removed.size + ' akun yang dihitung MASIH ADA di daftar', {
+      contoh: masih.slice(0, 10),
+    });
+  } else {
+    log('Recheck: semua ' + state.removed.size + ' akun yang dihitung sudah tidak ada di daftar');
+  }
+  return {
+    modal: true,
+    terverifikasi: state.removed.size,
+    masihDiDaftar: masih.length,
+    contoh: masih.slice(0, 10),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
+// Satu loop saja: START kedua tidak boleh membuat loop paralel (dua loop paralel
+// mengklik baris yang sama dan membuat angka count dobel).
+function startLoop() {
+  if (state.loopActive) {
+    log('Loop sudah berjalan — START kedua diabaikan (mencegah klik & hitung dobel)');
+    return;
+  }
+  state.loopActive = true;
+  runLoop();
+}
+
 async function runLoop() {
-  if (!state.running) return;
-  const modal = findModal();
+  if (!state.running) { state.loopActive = false; return; }
+  const token = state.runToken;
+  const modal = findModalCached();
   if (!modal) {
     log('Modal ' + modalTitle() + ' tidak terbuka — buka dulu daftar ' + modalTitle() + ' di profil');
     setTimeout(runLoop, CONFIG.retryDelay);
@@ -559,39 +811,60 @@ async function runLoop() {
   }
   const rows = findRows(modal);
   state.detected = rows.length;
-  // Pilih baris pertama yang BELUM pernah dicoba (hindari loop pada baris yang sama).
-  const row = rows.find((r) => !state.attempted.has(usernameOf(r))) || null;
+  // Pilih baris yang belum terverifikasi hilang DAN percobaannya belum habis.
+  const row = rows.find((r) => canTryRow(usernameOf(r))) || null;
   log('Scan modal', {
     mode: state.modalMode,
     barisTerlihat: rows.length,
     tercoba: state.attempted.size,
+    terverifikasi: state.count,
     target: row ? usernameOf(row) : null,
   });
   if (!row) {
-    if (rows.length > 0) log('Semua baris terlihat sudah dicoba — menunggu baris baru / auto-scroll idle');
-    else log('Tidak ada baris terlihat — menunggu scroll agar baris termuat');
+    if (rows.length > 0) {
+      log('Tidak ada baris baru untuk diproses — rincian baris terlihat', skipBreakdown(rows));
+    } else {
+      log('Tidak ada baris terlihat — menunggu scroll agar baris termuat');
+    }
     setTimeout(runLoop, CONFIG.retryDelay);
     return;
   }
+  const u = usernameOf(row);
   try {
-    const u = usernameOf(row);
-    if (await tryRemoveRow(row)) {
-      state.count += 1;
+    const acted = (await tryRemoveRow(row)) === true; // true = UI mengklaim aksi dikonfirmasi
+    if (token !== state.runToken) { state.loopActive = false; return; } // run lama — berhenti
+    const check = await verifyRemoved(u, acted);
+    if (check.verified) {
+      state.removed.add(u);              // unik per akun — tidak mungkin dobel hitung
+      state.count = state.removed.size;
       state.lastProgressAt = Date.now();
-      log('✔ Proses remove dikirim (total ' + state.count + ')', { user: u });
+      markAttempt(u, 'hard');
+      log('✔ Terverifikasi (total ' + state.count + ')', { user: u, alasan: check.reason });
+    } else if (acted) {
+      state.failed += 1;
+      markAttempt(u, 'hard');
+      log('✖ Diklaim sukses tapi TIDAK terverifikasi — tidak dihitung', {
+        user: u,
+        alasan: check.reason,
+        percobaan: (state.attempts.get(u) || 0) + '/' + CONFIG.maxRowAttempts,
+      });
     } else {
-      log('✖ Remove tidak dikonfirm — skip, coba baris lain', { user: u });
+      // Tidak ada aksi yang terjadi (tombol/menu belum termuat) → JANGAN bakar jatah
+      // percobaan "nyata", cukup catat percobaan "tidak jelas" dan coba lagi nanti.
+      markAttempt(u, 'soft');
+      log('– Belum ada aksi di baris ini (tombol/menu belum siap) — akan dicoba lagi', {
+        user: u,
+        alasan: check.reason,
+        percobaanTidakJelas: state.softAttempts.get(u) + '/' + CONFIG.maxSoftAttempts,
+      });
     }
-    // Semua baris ditandai "tercoba" — supaya loop tidak stuck di baris yang sama,
-    // bahkan bila remove "sukses" tetapi baris belum hilang dari DOM.
-    state.attempted.add(u);
-    if (state.attempted.size > 300) state.attempted.clear();
   } catch (e) {
-    log('Error pada baris', { user: usernameOf(row), pesan: String((e && e.message) || e) });
-    state.attempted.add(usernameOf(row));
+    log('Error pada baris', { user: u, pesan: String((e && e.message) || e) });
+    markAttempt(u, 'hard');
   }
   await sleep(state.delay);
-  if (state.running) runLoop();
+  if (state.running && token === state.runToken) runLoop();
+  else state.loopActive = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -600,27 +873,49 @@ async function runLoop() {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   switch (msg.type) {
     case 'START': {
+      // Sudah berjalan? ABAIKAN saja — jangan reset counter & jangan buat loop
+      // kedua. Dua loop paralel dulu mengklik baris yang sama → angka dobel
+      // (kasus "count 89 tapi following cuma turun 44").
+      if (state.running) {
+        log('START diabaikan — proses sudah berjalan (mencegah dua loop & hitung dobel)');
+        sendResponse({ ok: true, running: true, delay: state.delay, ignored: true });
+        break;
+      }
+      state.runToken += 1; // token run baru
       state.running = true;
+      // Pola teks terbaru dari popup (bila dikirim) — supaya tab ini ikut setting
+      // terakhir walau storage belum sempat terbaca.
+      if (msg.patterns) applyPatterns(msg.patterns);
       state.mode = msg.mode === 'following' ? 'following' : 'followers';
       state.delay = Math.max(500, msg.delay || 1000);
       state.idleScrollSecs = Math.max(0, parseInt(msg.idleScrollSecs, 10) || 0);
       state.lastProgressAt = Date.now();
       state.scrollEl = null;
       state.count = 0;
+      state.failed = 0;
+      state.removed = new Set();
+      state.attempts = new Map();
+      state.softAttempts = new Map();
+      state.notTarget = new Set();
+      state.modalEl = null; // deteksi ulang modal pada run berikutnya
       state.logs = [];
       state.attempted = new Set();
       log('Mulai — mode ' + state.mode + ', delay ' + state.delay + ' ms' +
           (state.idleScrollSecs ? ', auto-scroll idle ' + state.idleScrollSecs + ' dtk' : ', auto-scroll mati'));
+      log('Angka "Removed" = hasil yang TERVERIFIKASI di daftar (aksi tanpa perubahan daftar tidak dihitung)');
       startWatchdog();
       diagnose();
-      runLoop();
+      startLoop();
       sendResponse({ ok: true, running: true, delay: state.delay });
       break;
     }
     case 'STOP':
       state.running = false;
+      state.runToken += 1; // hentikan loop yang sedang jalan
+      state.loopActive = false;
       stopWatchdog();
-      log('Dihentikan oleh pengguna');
+      log('Dihentikan oleh pengguna — terverifikasi ' + state.count +
+          (state.failed ? ', tidak terverifikasi ' + state.failed : ''));
       sendResponse({ ok: true, running: false });
       break;
     case 'STATUS':
@@ -628,17 +923,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         running: state.running,
         mode: state.mode,
         count: state.count,
+        failed: state.failed,
+        notTarget: state.notTarget.size,
         detected: state.detected,
+        version: SCRIPT_VERSION || null,
         logs: state.logs,
       });
       break;
+    case 'VERIFY': {
+      // Bandingkan angka Removed dengan isi daftar saat ini (tombol Recheck).
+      const report = recheckRemoved();
+      sendResponse({ ok: true, report, logs: state.logs });
+      break;
+    }
+    case 'SET_PATTERNS': {
+      // Pola teks dikirim dari popup (panel "Patterns") — langsung dipakai di tab ini.
+      const res = applyPatterns(msg.patterns || {});
+      sendResponse({ ok: res.ok, errors: res.errors, patterns: currentPatterns() });
+      break;
+    }
     case 'DIAGNOSE': {
       const info = diagnose();
       sendResponse({ ok: true, diag: info, logs: state.logs });
       break;
     }
     case 'DUMP': {
-      const modal = findModal();
+      const modal = findModalCached();
       if (!modal) {
         log('DUMP: modal Followers tidak terbuka');
       } else {
@@ -673,5 +983,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
-log('Content script dimuat di threads.com');
+log('Content script dimuat di threads.com (v' + (SCRIPT_VERSION || '?') + ')');
+loadStoredPatterns(); // pola tersimpan dari popup (bila ada) langsung dipakai
 diagnose();

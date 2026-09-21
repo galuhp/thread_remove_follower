@@ -9,6 +9,10 @@
     <header>
       <h1>Threads Follower Remover</h1>
       <p class="subtitle">Remove followers or unfollow accounts (remove following) on Threads.</p>
+      <p class="version-line">
+        <span class="badge" id="versionText" title="Versi extension (manifest.json)">v…</span>
+        <span class="badge muted" id="csVersionText" title="Versi content script di tab aktif">content v…</span>
+      </p>
     </header>
 
     <div class="status-row">
@@ -41,17 +45,38 @@
     </div>
 
     <div class="actions">
-      <button id="startBtn" class="primary">Start</button>
-      <button id="stopBtn" class="danger">Stop</button>
+      <!-- disabled sampai poll STATUS pertama: mencegah START dobel (dua loop paralel). -->
+      <button id="startBtn" class="primary" disabled>Start</button>
+      <button id="stopBtn" class="danger" disabled>Stop</button>
     </div>
 
-    <p class="count">Removed: <strong id="count">0</strong></p>
+    <p class="count">
+      Removed: <strong id="count">0</strong>
+      <span id="failedNote" class="failed-note"></span>
+      <span id="skipNote" class="skip-note"></span>
+    </p>
+
+    <details class="patterns" id="patternsBox">
+      <summary>Patterns (regex pencocokan UI)</summary>
+      <p class="patterns-hint">
+        Ubah bila Threads mengganti teks/bahasa. Flag <code>i</code> otomatis;
+        default-nya di <code>patterns.js</code>. Nilai tersimpan di browser dan
+        langsung dipakai tab Threads (tanpa reload).
+      </p>
+      <div id="patternFields" class="pattern-fields"></div>
+      <div class="patterns-actions">
+        <button id="savePatternsBtn" type="button" class="primary">Save</button>
+        <button id="resetPatternsBtn" type="button">Reset default</button>
+        <span id="patternsStatus" class="patterns-status"></span>
+      </div>
+    </details>
 
     <div class="log-header">
       <span>Debug log</span>
       <span>
         <button id="diagnoseBtn" type="button">Diagnose</button>
         <button id="dumpBtn" type="button">Dump HTML</button>
+        <button id="verifyBtn" type="button" title="Cek ulang: apakah akun yang dihitung benar-benar sudah hilang dari daftar">Recheck</button>
         <button id="pinBtn" type="button" title="Open as pinned window">📌 Pin</button>
         <button id="clearLogBtn" type="button">Clear</button>
       </span>
@@ -65,6 +90,7 @@
     </footer>
   </main>
 
+  <script src="patterns.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
