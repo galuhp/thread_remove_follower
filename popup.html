@@ -31,6 +31,10 @@
           <input type="radio" name="mode" value="following" />
           <span>Remove following</span>
         </label>
+        <label class="mode-opt" title="Mode ke-3: buka profil tiap orang → tombol … → Remove follower → konfirmasi → kembali ke daftar. Dipakai bila di modal Followers tombolnya hanya 'Follow back' (menu … tidak menawarkan Remove follower).">
+          <input type="radio" name="mode" value="profile" />
+          <span>Remove followers — via profil</span>
+        </label>
       </div>
     </div>
 
@@ -76,6 +80,7 @@
       <span>
         <button id="diagnoseBtn" type="button">Diagnose</button>
         <button id="dumpBtn" type="button">Dump HTML</button>
+        <button id="testMoreBtn" type="button" title="Uji klik tombol &hellip; di halaman yang sedang terbuka (mis. halaman profil teman) tanpa menjalankan loop">Test &hellip;</button>
         <button id="verifyBtn" type="button" title="Cek ulang: apakah akun yang dihitung benar-benar sudah hilang dari daftar">Recheck</button>
         <button id="pinBtn" type="button" title="Open as pinned window">📌 Pin</button>
         <button id="clearLogBtn" type="button">Clear</button>

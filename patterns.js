@@ -30,6 +30,12 @@ const TFR_DEFAULT_PATTERNS = {
   removeTerms: 'unfollow, remove follower, hapus pengikut, remove from followers, hapus follower',
   // aria-label tombol "…" (More) di baris.
   moreLabel: 'more|titik tiga|three dots|opsi',
+  // Tombol "…" di header profil orang lain (mode "via profil"). Dicocokkan ke
+  // aria-label ATAU teks tombol; teks "…" / "..." juga dicocokkan otomatis.
+  profileMoreLabel: 'more|titik tiga|three dots|opsi|lainnya',
+  // Escape hatch: selektor CSS persis untuk tombol "…" profil.
+  // Kosong = deteksi otomatis. Contoh: [aria-label="More"] atau div[role="button"].
+  profileMoreSelector: '',
   // Judul modal daftar sesuai mode.
   followersTitle: '^followers$|^pengikut$',
   followingTitle: '^following$|^mengikuti$',
@@ -49,6 +55,10 @@ const TFR_PATTERN_FIELDS = [
     hint: 'Kata kunci tambahan saat mencari menu remove (bukan regex).' },
   { key: 'moreLabel', label: 'More button label',
     hint: 'aria-label tombol "…" (More) di baris.' },
+  { key: 'profileMoreLabel', label: 'Profile "…" button label',
+    hint: 'aria-label/teks tombol "…" di header profil orang lain (mode "via profil"). Cocok juga otomatis dengan teks … / ...' },
+  { key: 'profileMoreSelector', label: 'Profile "…" selector (opsional)',
+    hint: 'Selektor CSS persis untuk tombol "…" profil, dipakai bila deteksi otomatis salah. Contoh: [aria-label="More"]. Kosongkan untuk otomatis.' },
   { key: 'followersTitle', label: 'Modal title — Followers',
     hint: 'Judul modal daftar Followers.' },
   { key: 'followingTitle', label: 'Modal title — Following',
@@ -78,12 +88,21 @@ function tfrNormalizePatterns(cfg) {
   return out;
 }
 
-// Validasi semua field regex (removeTerms = kata kunci, bukan regex).
+// Validasi semua field regex (removeTerms = kata kunci, profileMoreSelector =
+// selektor CSS — boleh kosong karena artinya "deteksi otomatis").
 // Mengembalikan { ok, errors: { key: pesan } }.
 function tfrValidatePatterns(cfg) {
   const errors = {};
   TFR_PATTERN_FIELDS.forEach(({ key, label }) => {
     const value = cfg[key];
+    if (key === 'profileMoreSelector') {
+      if (typeof value !== 'string') { errors[key] = label + ': harus teks'; return; }
+      if (!value.trim()) return; // kosong = otomatis (valid)
+      try { document.querySelectorAll(value); } catch (e) {
+        errors[key] = label + ': selektor CSS tidak valid';
+      }
+      return;
+    }
     if (typeof value !== 'string' || !value.trim()) { errors[key] = label + ': kosong'; return; }
     if (key === 'removeTerms') {
       if (!value.split(',').map((s) => s.trim()).filter(Boolean).length) {

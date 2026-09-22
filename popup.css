@@ -99,10 +99,11 @@ body {
 
 .mode-select {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .mode-opt {
-  flex: 1;
+  flex: 1 1 45%;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -115,6 +116,8 @@ body {
   color: #333;
   user-select: none;
 }
+/* Mode ke-3 (via profil) dapat satu baris penuh. */
+.mode-opt:last-child { flex: 1 1 100%; }
 .mode-opt:hover {
   border-color: #2563eb;
 }

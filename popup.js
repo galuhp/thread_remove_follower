@@ -11,6 +11,7 @@ const logBox = document.getElementById('logBox');
 const clearLogBtn = document.getElementById('clearLogBtn');
 const diagBtn = document.getElementById('diagnoseBtn');
 const dumpBtn = document.getElementById('dumpBtn');
+const testMoreBtn = document.getElementById('testMoreBtn');
 const pinBtn = document.getElementById('pinBtn');
 const verifyBtn = document.getElementById('verifyBtn');
 const failedNote = document.getElementById('failedNote');
@@ -224,12 +225,18 @@ function selectedMode() {
   return checked ? checked.value : 'followers';
 }
 
+// Label mode untuk teks status popup.
+function modeLabel(mode) {
+  return mode === 'following' ? 'following'
+    : mode === 'profile' ? 'followers (via profil)' : 'followers';
+}
+
 startBtn.addEventListener('click', async () => {
   const delay = Math.max(500, parseInt(delayInput.value, 10) || 1000);
   const idleScrollSecs = Math.max(0, parseInt(idleScrollInput.value, 10) || 0);
   try {
     await sendToTab('START', { delay, mode: selectedMode(), idleScrollSecs, patterns: collectPatterns() });
-    setStatus(true, `Removing ${selectedMode() === 'following' ? 'following' : 'followers'}…`, 'running');
+    setStatus(true, `Removing ${modeLabel(selectedMode())}…`, 'running');
     countEl.textContent = '0';
     failedNote.textContent = '';
     skipNote.textContent = '';
@@ -260,6 +267,29 @@ dumpBtn.addEventListener('click', async () => {
   try {
     const resp = await sendToTab('DUMP');
     renderLog(resp.logs, '[dump] cek log di atas untuk HTML baris pertama');
+  } catch (e) {
+    note(NO_SCRIPT_NOTE);
+  }
+});
+
+// Test "…" — uji klik tombol "…" di halaman yang sedang terbuka (mis. halaman
+// profil teman) TANPA menjalankan loop. Hasilnya: strategi klik yang berhasil,
+// menu terbuka/tidak, isi menu, dan riwayat tiap percobaan.
+testMoreBtn.addEventListener('click', async () => {
+  try {
+    const resp = await sendToTab('TEST_MORE');
+    if (!resp || !resp.found) {
+      renderLog(resp && resp.logs, '[test ' + '\u2026' + '] tombol tidak ditemukan di halaman ini');
+      return;
+    }
+    const ringkas = {
+      strategiBerhasil: resp.strategy || '-',
+      menuTerbuka: !!resp.opened,
+      opsiRemoveDitemukan: !!resp.itemFound,
+      isiMenu: resp.labels || [],
+      riwayat: resp.detail || [],
+    };
+    renderLog(resp.logs, '[test ' + '\u2026' + '] ' + JSON.stringify(ringkas));
   } catch (e) {
     note(NO_SCRIPT_NOTE);
   }
@@ -298,7 +328,7 @@ async function poll() {
     failedNote.textContent = resp.failed ? '· tidak terverifikasi: ' + resp.failed : '';
     // Baris yang sengaja dilewati karena bukan target (tombolnya sudah "Follow").
     skipNote.textContent = resp.notTarget ? '· dilewati (bukan target): ' + resp.notTarget : '';
-    if (resp.running) setStatus(true, `Removing ${resp.mode === 'following' ? 'following' : 'followers'}… (${resp.count} done)`, 'running');
+    if (resp.running) setStatus(true, `Removing ${modeLabel(resp.mode)}… (${resp.count} done)`, 'running');
     else setStatus(false, 'Idle');
     renderContentVersion(typeof resp.version === 'string' ? resp.version : null);
     renderLog(resp.logs);
